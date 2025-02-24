@@ -13,6 +13,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/auth"
+	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/vid"
 	"github.com/google/uuid"
 )
 
@@ -47,8 +48,8 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	uploadLimit := 1 << 30  //1 GB
-	r.Body = http.MaxBytesReader(w, r.Body, int64(uploadLimit))   //limit request body size
+	uploadLimit := 1 << 30                                      //1 GB
+	r.Body = http.MaxBytesReader(w, r.Body, int64(uploadLimit)) //limit request body size
 
 	maxMemory := 50 << 20
 	if err := r.ParseMultipartForm(int64(maxMemory)); err != nil {
@@ -74,28 +75,42 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	tempFile, err := os.CreateTemp("", "tubely-upload.mp4")
+	tempFile, err := os.CreateTemp("", "tubely-upload*.mp4")
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Couldn't create temporary file", err)
 		return
 	}
+	
 	defer os.Remove(tempFile.Name())
 	defer tempFile.Close()
-	io.Copy(tempFile, file) //copied stream to tempFile in file system
+	io.Copy(tempFile, file)        //copied stream to tempFile in file system
 	tempFile.Seek(0, io.SeekStart) //used io.SeekStart instead of 0 to improve code readability
-
+	
 	by := make([]byte, 32)
 	rand.Read(by)
-
+	
+	aspectRatio, err := vid.GetVideoAspectRatio(tempFile.Name())
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Couldn't get aspect ratio", err)
+		return
+	}
+	var prefix string
+	if aspectRatio == "16:9" {
+		prefix = "landscape"
+	} else if aspectRatio == "9:16" {
+		prefix = "portrait"
+	} else {
+		prefix = "other"
+	}
 	bucket := aws.String(cfg.s3Bucket)
-	key := aws.String(base64.RawURLEncoding.EncodeToString(by)+".mp4")
-	objInput := s3.PutObjectInput {
-		Bucket: bucket,
-		Key: key,
-		Body: tempFile,
+	key := aws.String(prefix + base64.RawURLEncoding.EncodeToString(by) + ".mp4")
+	objInput := s3.PutObjectInput{
+		Bucket:      bucket,
+		Key:         key,
+		Body:        tempFile,
 		ContentType: aws.String(mediaType),
 	}
-	
+
 	_, err = cfg.s3Client.PutObject(r.Context(), &objInput)
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Something went wrong", err)

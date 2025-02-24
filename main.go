@@ -86,7 +86,7 @@ func main() {
 	}
 
 	s3cfg, err := config.LoadDefaultConfig(context.Background(),
-	config.WithRegion(s3Region))
+		config.WithRegion(s3Region))
 	if err != nil {
 		log.Panic("Couldnt load AWS S3 config", err)
 	}
