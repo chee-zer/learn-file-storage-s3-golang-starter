@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"fmt"
@@ -9,10 +10,13 @@ import (
 	"mime"
 	"net/http"
 	"os"
+	"strings"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/auth"
+	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/database"
 	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/vid"
 	"github.com/google/uuid"
 )
@@ -75,39 +79,58 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	tempFile, err := os.CreateTemp("", "tubely-upload*.mp4")
+	tempFile, err := os.CreateTemp("", "tubely-upload_*.mp4")
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Couldn't create temporary file", err)
 		return
 	}
-	
+
 	defer os.Remove(tempFile.Name())
 	defer tempFile.Close()
 	io.Copy(tempFile, file)        //copied stream to tempFile in file system
 	tempFile.Seek(0, io.SeekStart) //used io.SeekStart instead of 0 to improve code readability
-	
+
 	by := make([]byte, 32)
 	rand.Read(by)
-	
+
 	aspectRatio, err := vid.GetVideoAspectRatio(tempFile.Name())
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Couldn't get aspect ratio", err)
 		return
 	}
+
+	processedFilepath, err := vid.ProcessVideoForFastStart(tempFile.Name())
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Couldn't process file for fast start", err)
+		return
+	}
+
+	processedFile, err := os.Open(processedFilepath)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Couldn't open fast start file", err)
+		return
+	}
+
+	defer os.Remove(processedFilepath)
+	defer processedFile.Close()
+
 	var prefix string
 	if aspectRatio == "16:9" {
-		prefix = "landscape"
+		prefix = "landscape/"
 	} else if aspectRatio == "9:16" {
-		prefix = "portrait"
+		prefix = "portrait/"
 	} else {
-		prefix = "other"
+		prefix = "other/"
 	}
+
+	// convert these to *string cuz aws works with those:
+	// because strings cant have nil values, but pointers can. Its to differentiate between "" and nil
 	bucket := aws.String(cfg.s3Bucket)
 	key := aws.String(prefix + base64.RawURLEncoding.EncodeToString(by) + ".mp4")
 	objInput := s3.PutObjectInput{
 		Bucket:      bucket,
 		Key:         key,
-		Body:        tempFile,
+		Body:        processedFile,
 		ContentType: aws.String(mediaType),
 	}
 
@@ -116,12 +139,42 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		respondWithError(w, http.StatusInternalServerError, "Something went wrong", err)
 		return
 	}
-	videoUrl := fmt.Sprintf("https://%v.s3.%v.amazonaws.com/%v", cfg.s3Bucket, cfg.s3Region, *key)
+	videoUrl := cfg.s3Bucket + "," + *key
 	videoMetadata.VideoURL = &videoUrl
 
 	if err := cfg.db.UpdateVideo(videoMetadata); err != nil {
-		respondWithError(w, http.StatusInternalServerError, "Couldn't Update Thumbnail", err)
+		respondWithError(w, http.StatusInternalServerError, "Couldn't Update Video", err)
 		return
 	}
 	log.Println("done: ", *videoMetadata.VideoURL)
+}
+
+func generatePresignedURL(s3Client *s3.Client, bucket, key string, expireTime time.Duration) (string, error) {
+	pClient := s3.NewPresignClient(s3Client)
+	signedReq, err := pClient.PresignGetObject(context.Background(), &s3.GetObjectInput{Bucket: aws.String(bucket), Key: aws.String(key)}, s3.WithPresignExpires(expireTime))
+	if err != nil {
+		return "", err
+	}
+
+	return signedReq.URL, nil
+}
+
+func (cfg *apiConfig) dbVideoToSignedVideo(video database.Video) (database.Video, error) {
+	videoUrl := video.VideoURL
+	if videoUrl == nil || *videoUrl == "" {
+        return video, nil
+    }
+	log.Println("HELLO: ", *videoUrl)
+	videoUrlParts := strings.Split(*videoUrl, ",")
+	if len(videoUrlParts) < 2 {
+		return database.Video{}, fmt.Errorf("invalid url")
+	}
+	bucket := videoUrlParts[0]
+	key := videoUrlParts[1]
+	presignedURL, err := generatePresignedURL(cfg.s3Client, bucket, key, 15*time.Minute)
+	if err != nil {
+		return database.Video{}, err
+	}
+	video.VideoURL = &presignedURL
+	return video, nil
 }

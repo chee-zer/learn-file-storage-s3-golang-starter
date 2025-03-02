@@ -8,7 +8,7 @@ import (
 	"os/exec"
 )
 
-func gcd (a, b int) int {
+func gcd(a, b int) int {
 	if a == b {
 		return a
 	} else if a > b {
@@ -20,8 +20,6 @@ func gcd (a, b int) int {
 
 func GetVideoAspectRatio(filepath string) (string, error) {
 	cmd := exec.Command("ffprobe", "-v", "error", "-print_format", "json", "-show_streams", filepath)
-	log.Println(filepath)
-	log.Println("testing, we have arrived.")
 	out := bytes.Buffer{}
 	cmd.Stdout = &out
 	cmd.Stderr = &out
